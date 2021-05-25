@@ -16,15 +16,13 @@ import logging
 import fiona
 from shapely.geometry import MultiPolygon
 from shapely.geometry import Polygon
-
-from osmnx.core import create_graph
-from osmnx.core import truncate_graph_polygon
-from osmnx.core import osm_net_download
-from osmnx.simplify import simplify_graph
+import pickle
+from shapely.wkt import loads
+from osmnx.truncate import truncate_graph_polygon
+from osmnx.simplification import simplify_graph
 from osmnx.projection import project_geometry
-from osmnx.utils import count_streets_per_node
+from osmnx.utils_graph import count_streets_per_node
 import osmnx.settings as settings
-
 # local modules
 from create_network_from_osm_dump import graph_create_unique_ids
 from create_network_from_osm_dump import graph_to_gdf
@@ -136,11 +134,11 @@ def graph_from_polygon(polygon, network_type='all_private',
 
         # get the network data from OSM,  create the buffered graph, then
         # truncate it to the buffered polygon
-        response_jsons = osm_net_download(polygon=polygon_buffered, network_type=network_type,
+        response_jsons = osmnx.downloader._osm_network_download(polygon=polygon_buffered, network_type=network_type,
                                           timeout=timeout, memory=memory,
                                           max_query_area_size=max_query_area_size,
                                           infrastructure=infrastructure, custom_filter=custom_filter)
-        G_buffered = create_graph(response_jsons, name=name, retain_all=True,
+        G_buffered = osmnx.graph._create_graph(response_jsons, name=name, retain_all=True,
                                   bidirectional=network_type in settings.bidirectional_network_types)
 
         G_buffered = truncate_graph_polygon(G_buffered, polygon_buffered, retain_all=True, truncate_by_edge=truncate_by_edge)
@@ -174,13 +172,13 @@ def graph_from_polygon(polygon, network_type='all_private',
         # truncate the graph to the extent of the polygon
         G = truncate_graph_polygon(G, polygon, retain_all=retain_all, truncate_by_edge=truncate_by_edge)
         # add unique identifier for the complex graph
-        G = graph_create_unique_ids(G, 'G_complex_fid')
+        G = graph_create_unique_ids(G, 'G_fid_complex')
 
     logging.info('graph_from_polygon() returning graph with {:,} nodes and {:,} edges'.format(len(list(G.nodes())), len(list(G.edges()))))
     return G
 
 
-def get_graph_from_polygon(InputDict, undirected=True, simplify=True, save_shapes=''):
+def get_graph_from_polygon(InputDict, undirected=True, simplify=True, save_shapes='',save_files=''):
     """
     Get an OSMnx graph from a polygon shapefile .
 
@@ -212,22 +210,28 @@ def get_graph_from_polygon(InputDict, undirected=True, simplify=True, save_shape
         for r in source:
             if 'geometry' in r:  # added this line to not take into account "None" geometry
                 polygon = shape(r['geometry'])
+                # wkt = polygon.to_wkt()
+                # geom = loads(wkt)
+                # polygon, _ = osmnx.projection.project_geometry(polygon, crs={'init': 'epsg:4326'}, to_latlong=True)
 
     if 'road_types' in InputDict:
         RoadTypes = InputDict['road_types']
-        print(RoadTypes)
+        cf = ('["highway"~"{}"]'.format(RoadTypes))
+        print(cf)
         # assuming the empty cell in the excel is a numpy.float64 nan value
-        #osmnx 0.16
-        #G = osmnx.graph_from_polygon(polygon=polygon, network_type=NetworkType, custom_filter='["highway"~"{}"]'.format(RoadTypes))
-        G_complex = graph_from_polygon(polygon=polygon, network_type=NetworkType,infrastructure='way["highway"~"motorway|trunk|primary"]', simplify=False)
+        #osmnx 0.16/1.01
+
+        G_complex = osmnx.graph_from_polygon(polygon=polygon, custom_filter=cf, simplify=False, retain_all=True)
+        # osmnx OLD
+        # G_complex = graph_from_polygon(polygon=polygon, network_type=NetworkType,infrastructure='way["highway"~"motorway|trunk|primary"]', simplify=False)
     else:
-        G_complex = graph_from_polygon(polygon=polygon, network_type=NetworkType, simplify=False)
+        G_complex = osmnx.graph_from_polygon(polygon=polygon, network_type=NetworkType, simplify=False, retain_all=True)
 
 
     # simplify the graph topology as the last step.
     if simplify:
         G_simple = simplify_graph(G_complex)
-        G_simple = graph_create_unique_ids(G_simple, 'G_simple_fid')
+        G_simple = graph_create_unique_ids(G_simple, 'G_fid_simple')
         print('graphs_from_o5m() returning graph with {:,} nodes and {:,} edges'.format(len(list(G_simple.nodes())),
                                                                                         len(list(G_simple.edges()))))
     else:
@@ -245,13 +249,25 @@ def get_graph_from_polygon(InputDict, undirected=True, simplify=True, save_shape
         graph_to_shp(G_complex, Path(InputDict['output']/(str(InputDict['analysis_name'])+'_G_complex_edges.shp')),
                      Path(InputDict['output']/(str(InputDict['analysis_name'])+'_G_complex_nodes.shp')))
 
+
         if simplify:
             graph_to_shp(G_simple, Path(InputDict['output']/(str(InputDict['analysis_name'])+'_G_simple_edges.shp')),
                      Path(InputDict['output']/(str(InputDict['analysis_name'])+'_G_simple_nodes.shp')))
 
+    if save_files:
+        path = Path(InputDict['output'] / (str(InputDict['analysis_name'])+'_G_simple.gpickle'))
+        nx.write_gpickle(G_simple, path, protocol=4)
+        print(path, 'saved')
+        path = Path(InputDict['output'] / (str(InputDict['analysis_name'])+'_G_complex.gpickle'))
+        nx.write_gpickle(G_complex, path, protocol=4)
+        print(path, 'saved')
+        edges_complex, node_complex = graph_to_gdf(G_complex)
+        with open(str((InputDict['output']) / (str(InputDict['analysis_name'])+'_edges_complex.p')), 'wb') as handle:
+            pickle.dump(edges_complex, handle)
+            print(str((InputDict['output']) / (str(InputDict['analysis_name'])+'_edges_complex.p saved')))
     return G_complex, G_simple
 
-def from_polygon_tool_workflow(InputDict):
+def from_polygon_tool_workflow(InputDict, save_shapes= '', save_files=''):
     """
     Example workflow for use in the tool version of RA2CE
 
@@ -269,7 +285,7 @@ def from_polygon_tool_workflow(InputDict):
         G_complex_edges (GeoDataFrame : Complex graph (for use in the direct analyses)
     """
     ra2ce_main_path = Path(__file__).parents[1]
-    G_complex, G_simple =get_graph_from_polygon(InputDict, save_shapes=True)
+    G_complex, G_simple =get_graph_from_polygon(InputDict, save_shapes=save_shapes, save_files=save_files)
 
     #CONVERT GRAPHS TO GEODATAFRAMES
     print('Start converting the graphs to geodataframes')

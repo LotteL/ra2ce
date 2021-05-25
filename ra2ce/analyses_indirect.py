@@ -100,7 +100,7 @@ def multi_link_alternative_routes(G, InputDict, crs=4326):
     if 'shp_unique_ID' in InputDict:
         id_name = InputDict['shp_unique_ID']
     else:
-        id_name = 'osmid'
+        id_name = 'G_fid_simple'
 
     # initiate variables
     id_name_hazard = None
@@ -400,7 +400,7 @@ def multi_link_od_matrix(G, InputDict, crs=4326):
     if 'id_name' in InputDict:
         id_name = InputDict['id_name']
     else:
-        id_name = 'osmid'
+        id_name = 'G_fid_simple'
 
     if InputDict:
         # there is hazard data available
@@ -408,28 +408,56 @@ def multi_link_od_matrix(G, InputDict, crs=4326):
             id_name_hazard = InputDict['ID']
 
     # not all edges contain the attribute 'geometry' - because of geometry simplification these are streets that are straight and can be computed
-    # TODO check if this is necessary
-    G = add_missing_geoms_graph(G)
+    # TODO: check that the right file is selected. Currently the filename is hardcoded. In future situations you would like to have this flexible
+    G_hazard_path = Path(InputDict['output'] / (str(InputDict['analysis_name']) + '_G_hazard.gpickle'))
+    # G_hazard_path = Path(InputDict['output'] / ('DH_drive_G_hazard.gpickle'))
+    # check for G_hazard first (similar to ra2ce.py main script) Hazard intersect can take long.
+    if not (G_hazard_path.exists()):
+        print('G_hazard does not exist. Hazard intersect starts now')
+        # TODO check if this is necessary
+        G = add_missing_geoms_graph(G)
 
-    if (id_name_hazard is None) & (len(InputDict) != 0):
-        G = hazard_intersect_graph(G, InputDict['hazard_data'], InputDict['hazard_attribute_name'], InputDict['analysis_name'],
-                                   agg=InputDict['hazard_aggregation'])
+        if (id_name_hazard is None) & (len(InputDict) != 0):
+            G = hazard_intersect_graph(G, InputDict['hazard_data'], InputDict['hazard_attribute_name'], InputDict['analysis_name'],
+                                       agg=InputDict['hazard_aggregation'])
+        path = Path(InputDict['output'] / (str(InputDict['analysis_name']) + '_G_hazard.gpickle'))
+        nx.write_gpickle(G, path, protocol=4)
+        print(path, 'saved')
+    else:
+        print('G_hazard already exists, uses the existing one!: {}'.format(G_hazard_path))
+        G = nx.read_gpickle(G_hazard_path)
 
     # Add the origin/destination nodes to the network
     ods = read_OD_files(InputDict['origin_shp'], InputDict['o_names'],
                         InputDict['destination_shp'], InputDict['d_names'],
                         InputDict['id_name_origin_destination'], crs)
 
-    ods = create_OD_pairs(ods, G, id_name)
-    G = add_od_nodes(G, ods, id_name, name=InputDict['analysis_name'], file_output=InputDict['output'], save_shp=True)
+    od_pairs_path = Path(InputDict['output'] / (str(InputDict['analysis_name']) + '_G_hazard_od_pairs.shp'))
+
+    # check for G_hazard first (similar to ra2ce.py main script) Hazard intersect can take long.
+    if not (od_pairs_path.exists()):
+        # todo: after check put save_shp back to False
+        ods = create_OD_pairs(ods, G, id_name, InputDict=InputDict, save_shp=True, save_pickle=True)
+    else:
+        print('OD_pairs already exists, uses the existing one!: {}'.format(od_pairs_path))
+        # ods = nx.read_gpickle(od_pairs_path)
+        ods = gpd.read_file(od_pairs_path)
+        ods.rename(columns={'geometry':'OD'},inplace=True)
+
+    od_graph_path = Path(InputDict['output'] / (str(InputDict['analysis_name']) + '_G_hazard_OD.gpickle'))
+    if not (od_graph_path.exists()):
+        # todo: after check put save_shp back to False
+        G = add_od_nodes(G, ods, id_name, name=InputDict['analysis_name'], InputDict=InputDict, save_shp=True, save_pickle=True)
+    else:
+        print('G_hazard_OD_pairs already exists, uses the existing one!: {}'.format(od_graph_path))
+        G = nx.read_gpickle(od_graph_path)
 
 
 
     if weighing == 'time':
         # not yet possible for input with shapefiles, except when a max speed attribute is attached to the shapefile
         # calculate the time it takes per road segment
-        avg_speeds = calc_avg_speed(G, 'highway', save_csv=True,
-                                    save_path=os.path.join(InputDict['output'], 'avg_speeds_{}.csv'.format(InputDict['analysis_name'])))
+        avg_speeds = calc_avg_speed(G, 'highway', save_csv=True, save_path=os.path.join(InputDict['output'], 'avg_speeds_{}.csv'.format(InputDict['analysis_name'])))
         avg_speeds = pd.read_csv(os.path.join(InputDict['output'], 'avg_speeds_{}.csv'.format(InputDict['analysis_name'])))
         if len(avg_speeds.loc[avg_speeds['avg_speed'] == 0]) > 0:
             logging.info("An average speed of 50 is used in locations where the maximum speed limit is 0 in OSM data.")
@@ -442,9 +470,22 @@ def multi_link_od_matrix(G, InputDict, crs=4326):
             G[u][v][k][weighing] = hours * 3600
 
     # Calculate the preferred routes
-    pref_routes = preferred_routes_od(G, weighing, id_name, ods, crs, InputDict, shortest_route=True,
-                                      save_shp=True, save_pickle=False,
+    pref_routes = preferred_routes_od(G, weighing, id_name, ods, crs, InputDict, shortest_route=False,
+                                      save_shp=True, save_pickle=True,
                                       file_output=InputDict['output'], name=InputDict['analysis_name'])
+
+    # origin_closest_dest, other = find_closest_node_attr(G, InputDict['id_name_origin_destination'], weighing, o_name, d_name)
+    # pref_routes, base_graph = calc_pref_routes_closest_dest(G, base_graph, weighing, crs, InputDict['id_name_origin_destination'], idName,
+    #                                                         origin_closest_dest, neighborhoods, nr_people_name,
+    #                                                         factor_hospital)
+    #
+    # # Find the distance of the routes to the hospitals, see if those hospitals are flooded or not
+    # base_graph, hospitals, list_hospital_flooded, pp_no_delay, pp_delayed, extra_dist_meters, extra_miles = \
+    #     calc_routes_closest_dest(G, base_graph, origin_closest_dest, pref_routes, weighing, InputDict['origin_shp'],
+    #                              InputDict['destination_shp'], InputDict['id_name_origin_destination'], wd,
+    #                              InputDict['hazard_threshold'])
+
+# , factor_hospital, nr_people_name
 
     # Calculate the criticality
     gdf = criticality_multi_link_hazard_OD(G, pref_routes, weighing, InputDict['hazard_attribute_name'][0],
@@ -546,6 +587,12 @@ def multi_link_od_matrix_rws(G, InputDict, save_file=True, crs=4326):
     pref_routes = preferred_routes_rws(G, weighing, id_name, ods, crs, InputDict, shortest_route=False,
                                       save_shp=True, save_pickle=True,
                                       file_output=InputDict['output'], name=InputDict['analysis_name'])
+
+    # origin_closest_dest, other = find_closest_node_attr(G, 'od_id', weighing, o_name, d_name)
+    # pref_routes, base_graph = calc_pref_routes_closest_dest(G, base_graph, weighing, crs, od_id, idName,
+    #                                                         origin_closest_dest, neighborhoods, nr_people_name,
+    #                                                         factor_hospital)
+
     # TODO: add nodes so this to_undirected action is not necessary!
     G=G.to_undirected()
 
@@ -1261,7 +1308,7 @@ def read_OD_files(origin_paths, origin_names, destination_paths, destination_nam
     return od
 
 
-def create_OD_pairs(od, graph, id_name, name=None, file_output=None, save_shp=False, save_pickle=False):
+def create_OD_pairs(od, graph, id_name, name=None, InputDict=None, save_shp=False, save_pickle=False):
     """Get centroids of the selected NUTS-3 regions and gets closest vertice on the road of a graph.
     Args:
         origins [string]: file path of shapefile of the NUTS-3 regions in Europe
@@ -1295,13 +1342,20 @@ def create_OD_pairs(od, graph, id_name, name=None, file_output=None, save_shp=Fa
     od = find_closest_vertice(od, idx, all_vertices, vertices_dict, edge_list, id_name)
 
     # save OD points
+    # if save_shp:
+    #     gdf_to_shp(od, os.path.join(file_output, name + "_od_pairs.shp"))
+    #     print("Saved OD pairs to shapefiles: {} and {}".format(os.path.join(file_output, name + "_od_pairs.shp")))
+    # if save_pickle:
+    #     pickle.dump(od, open(os.path.join(file_output, name + "_od_pairs.p"), 'wb'))
+    #     print("Saved OD pairs to pickles: {} and {}".format(os.path.join(file_output, name + "_od_pairs.p")))
     if save_shp:
-        gdf_to_shp(od, os.path.join(file_output, name + "_od_pairs.shp"))
-        print("Saved OD pairs to shapefiles: {} and {}".format(os.path.join(file_output, name + "_od_pairs.shp")))
+        path = Path(InputDict['output'] / (str(InputDict['analysis_name']) + '_G_hazard_OD_pairs.shp'))
+        gdf_to_shp(od, path)
+        print("\nThe shapefile with OD pairs can be found here:\n{}".format(path))
     if save_pickle:
-        pickle.dump(od, open(os.path.join(file_output, name + "_od_pairs.p"), 'wb'))
-        print("Saved OD pairs to pickles: {} and {}".format(os.path.join(file_output, name + "_od_pairs.p")))
-
+        path = Path(InputDict['output'] / (str(InputDict['analysis_name']) + '_G_hazard_od_pairs.gpickle'))
+        nx.write_gpickle(od, path, protocol=4)
+        print("\nThe pickle with OD pairs can be found here:\n{}".format(path))
     return od
 
 
@@ -1339,8 +1393,24 @@ def find_closest_vertice(origins_destinations, spatial_idx, search_vertices, ver
 
     return origins_destinations
 
+def find_new_nearest_vertice(edge_list,graph, od, id_name, match_OD,i):
+    vertices_dict = {}
+    for line in edge_list:
+        vertices_dict[(line[0], line[1])] = [Point(p) for p in set(list(line[-1]['geometry'].coords))]
+    all_vertices = [p for sublist in list(vertices_dict.values()) for p in sublist]
+    # create an empty spatial index object to search in
+    idx = rtree.index.Index()
+    # populate the spatial index
+    for j, pnt in enumerate(all_vertices):
+        idx.insert(j, pnt.bounds)
+    # find the closest vertice and line the vertice lays on
+    target = list(idx.nearest(match_OD.coords[0]))
+    match_OD = [all_vertices[ip] for ip in target]
+    match_OD = match_OD[0]
+    all_matches = [am for am in edge_list if match_OD.coords[0] in [p for p in set(list(am[-1]['geometry'].coords))]]
+    return all_matches,match_OD
 
-def add_od_nodes(graph, od, id_name, name=None, file_output=None, save_shp=False, save_pickle=False):
+def add_od_nodes(graph, od, id_name, name=None, InputDict=None, save_shp=False, save_pickle=False):
     """From a geodataframe of vertices on a graph, adds nodes on that graph.
     Args:
         graph [networkX graph]: graph of the roads of a or multiple European countries
@@ -1358,32 +1428,51 @@ def add_od_nodes(graph, od, id_name, name=None, file_output=None, save_shp=False
 
     # Check the highest node id, to add on that
     max_node_id = max([n for n in graph.nodes()])
+    print('adding OD nodes to graph...')
 
     for i in range(len(od.index)):
+        drawProgressBar(i / len(od.index))
         # the vertice on the edge that is closest to the origin/destination point
         match_OD = od.iloc[i]['OD']
-
         # Check which roads belong to the centroids closest vertices
         all_matches = [e for e in graph.edges(data=True, keys=True) if str(e[-1][id_name]) == od.iloc[i]['match_ids']]
         if len(all_matches) > 1:
-            all_matches = [am for am in all_matches if
-                           match_OD in [Point(p) for p in set(list(am[-1]['geometry'].coords))]]
+            # all_matches = [am for am in all_matches if match_OD in [(Point(p) for p in set(list(am[-1]['geometry'].coords)))]]
+            all_matches = [am for am in all_matches if match_OD.coords[0] in [p for p in set(list(am[-1]['geometry'].coords))]]
+            if len(all_matches) == 0: #created to find nearest vertice when a new edge has already been created
+                #todo build this in in the other def find nearest vertice
+                edge_list = [e for e in graph.edges(data=True, keys=True) if
+                             str(e[-1][id_name]) == od.iloc[i]['match_ids']]
+                all_matches,match_OD = find_new_nearest_vertice(edge_list,graph, od, id_name, match_OD, i)
+        if len(all_matches) == 1:
+            if [am for am in all_matches if match_OD.coords[0] in [p for p in set(list(am[-1]['geometry'].coords))]] == []:
+                edge_list = [e for e in graph.edges(data=True, keys=True) if
+                             str(e[-1][id_name]) == od.iloc[i]['match_ids']]
+                all_matches,match_OD = find_new_nearest_vertice(edge_list,graph, od, id_name, match_OD, i)
+        if len(all_matches) == 0: #when the edge does not exist anymore in the adjusted graph. look over the full graph and find the nearest vertice
+            edge_list = [e for e in graph.edges.data() if 'geometry' in e[-1]]
+            all_matches, match_OD = find_new_nearest_vertice(edge_list, graph, od, id_name, match_OD, i)
         m = all_matches[0]
 
         if 'geometry' in m[-1]:
             match_geom = m[-1]['geometry']
-            match_edge = m[:3]
+            if len(m)==3:
+                match_edge = m[0],m[1],0
+            else:
+                match_edge = m[:3]
             match_name = od.iloc[i]['o_id']
+            if match_name == 'nan':
+                match_name = np.nan #convert string nans to np.nans to be able to differentiate between origins and destinations in the next step.
             if not match_name == match_name:
                 # match_name is nan, the point is not an origin but a destination
                 match_name = od.iloc[i]['d_id']
-
             new_lines = split_line_with_points(match_geom, [match_OD])
             if len(new_lines) == 2:
                 line1, line2 = new_lines
             else:
                 # if the vertice is at the end of the road; you don't have to add a new node
                 # but do add a new attribute to the node
+
                 if (graph.nodes[match_edge[0]]['geometry'].coords[0][1] == match_OD.coords[0][1]) & (
                     graph.nodes[match_edge[0]]['geometry'].coords[0][0] == match_OD.coords[0][0]):
                     if 'od_id' in graph.nodes[match_edge[0]]:
@@ -1397,8 +1486,13 @@ def add_od_nodes(graph, od, id_name, name=None, file_output=None, save_shp=False
                         graph.nodes[match_edge[1]]['od_id'] = graph.nodes[match_edge[1]]['od_id'] + ',' + match_name
                     else:
                         graph.nodes[match_edge[1]]['od_id'] = match_name
+                elif ((graph.nodes[match_edge[0]]['geometry'].coords[0][1] == match_OD.coords[0][1]) & (
+                    graph.nodes[match_edge[0]]['geometry'].coords[0][0] == match_OD.coords[0][0]))==False & ((graph.nodes[match_edge[1]]['geometry'].coords[0][1] == match_OD.coords[0][1]) & (
+                    graph.nodes[match_edge[1]]['geometry'].coords[0][0] == match_OD.coords[0][0]))==False:
+                    print(i)
+                    print('continue')
+                    continue
                 continue
-
             new_node_id = max_node_id + 1
             max_node_id = new_node_id
 
@@ -1408,6 +1502,7 @@ def add_od_nodes(graph, od, id_name, name=None, file_output=None, save_shp=False
             edge_data = graph.edges[match_edge]
 
             # Check which line is connected to which node. There can be 8 different combinations
+            #if 'line2' in locals():
             if (graph.nodes[match_edge[0]]['geometry'].coords[0][1] == line2.coords[-1][1]) & (
                 graph.nodes[match_edge[0]]['geometry'].coords[0][0] == line2.coords[-1][0]):
                 edge_data.update(length=line_length(line2), geometry=line2)
@@ -1427,6 +1522,8 @@ def add_od_nodes(graph, od, id_name, name=None, file_output=None, save_shp=False
                 graph.nodes[match_edge[1]]['geometry'].coords[0][0] == line2.coords[-1][0]):
                 edge_data.update(length=line_length(line2), geometry=line2)
                 graph.add_edge(match_edge[1], new_node_id, match_edge[-1], **edge_data)
+
+            #if 'line1' in locals():
 
             if (graph.nodes[match_edge[1]]['geometry'].coords[0][1] == line1.coords[0][1]) & (
                 graph.nodes[match_edge[1]]['geometry'].coords[0][0] == line1.coords[0][0]):
@@ -1453,11 +1550,14 @@ def add_od_nodes(graph, od, id_name, name=None, file_output=None, save_shp=False
             graph.remove_edge(u, v, k)
 
     if save_shp:
-        graph_to_shp(graph, os.path.join(file_output, '{}_OD_edges.shp'.format(name)),
-                     os.path.join(file_output, '{}_OD_nodes.shp'.format(name)))
+        path_edges = Path(InputDict['output'] / (str(InputDict['analysis_name']) + '_G_hazard_OD_edges.shp'))
+        path_nodes = Path(InputDict['output'] / (str(InputDict['analysis_name']) + '_G_hazard_OD_nodes.shp'))
+        graph_to_shp(graph, path_edges,path_nodes)
+        print("Saved graph to shapefile in {}".format(path_edges))
     if save_pickle:
-        nx.write_gpickle(graph, os.path.join(file_output, '{}_graph.gpickle'.format(name)))
-        print("Saved graph to pickle in {}".format(os.path.join(file_output, '{}_graph.gpickle'.format(name))))
+        path = Path(InputDict['output'] / (str(InputDict['analysis_name']) + '_G_hazard_OD.gpickle'))
+        nx.write_gpickle(graph, path, protocol=4)
+        print("Saved graph to pickle in {}".format(path))
 
     return graph
 
@@ -1479,8 +1579,9 @@ def preferred_routes_od(graph, weighing_name, idName, od, crs, hazard_data, shor
     pref_routes = gpd.GeoDataFrame(columns=['o_node', 'd_node', 'origin', 'destination',
                                             'pref_path', weighing_name, 'match_ids', 'geometry'],
                                    geometry='geometry', crs={'init': 'epsg:{}'.format(crs)})
-
+    graph=graph.to_undirected()
     # create list of origin-destination pairs
+    od=od.replace('nan', np.nan)
     od_pairs = [(a, b) for a in od.loc[od['o_id'].notnull(), 'o_id'] for b in od.loc[od['d_id'].notnull(), 'd_id']]
     all_nodes = [(n, v['od_id']) for n, v in graph.nodes(data=True) if 'od_id' in v]
     od_nodes = []
@@ -1490,7 +1591,9 @@ def preferred_routes_od(graph, weighing_name, idName, od, crs, hazard_data, shor
                          [(n, n_name) for n, n_name in all_nodes if (n_name == bb) | (bb in n_name)][0]))
 
     # create the routes between all OD pairs
+    i=0
     for o, d in od_nodes:
+        drawProgressBar(i / len(od_nodes))
         if nx.has_path(graph, o[0], d[0]):
             # calculate the length of the preferred route
             pref_route = nx.dijkstra_path_length(graph, o[0], d[0], weight=weighing_name)
@@ -1519,9 +1622,10 @@ def preferred_routes_od(graph, weighing_name, idName, od, crs, hazard_data, shor
                                               'destination': d[1], 'pref_path': pref_nodes,
                                               weighing_name: pref_route, 'match_ids': match_list,
                                               'geometry': pref_edges}, ignore_index=True)
+            i=i+1
 
     if shortest_route:
-        pref_routes = pref_routes.loc[pref_routes.sort_values(weighing_name).groupby('o_node').head(3).index]
+        pref_routes = pref_routes.loc[pref_routes.sort_values(weighing_name).groupby('o_node').head(5).index]
 
     # intersect the origin and destination nodes with the hazard map (now only geotiff possible)
     pref_routes['d_disrupt'] = None
@@ -1586,12 +1690,9 @@ def calc_avg_speed(graph, road_type_col_name, save_csv=False, save_path=None, ex
         all_road_types = exceptions + types
         df = pd.DataFrame({'road_types': all_road_types, 'avg_speed': 0})
 
-
-
-
-
         # calculate average speed
         for i in range(len(df)):
+            print(i)
             roadtype = df.road_types[i]
             all_edges = [(u, v, edata['maxspeed'], edata['length']) for u, v, edata in graph.edges.data() if
                          (str(edata[road_type_col_name]) == roadtype) & ('maxspeed' in edata)]
@@ -1601,12 +1702,14 @@ def calc_avg_speed(graph, road_type_col_name, save_csv=False, save_path=None, ex
                 if isinstance(s, list):
                     ns = []
                     for ss in s:
-                        if not any(c.isalpha() for c in ss) and not (';' in ss) and not ('|' in ss):
+                        if not any(c.isalpha() for c in ss) and not (';' in ss) and not ('|' in ss) and not (',' in ss):
                             ns.append(int(ss))
                         elif not any(c.isalpha() for c in ss) and ';' in ss:
                             ns.extend([int(x) for x in ss.split(';') if x.isnumeric()])
                         elif not any(c.isalpha() for c in ss) and '|' in ss:
                             ns.extend([int(x) for x in ss.split('|') if x.isnumeric()])
+                        elif not any(c.isalpha() for c in s) and ',' in s:
+                            ns.extend([int(x) for x in s.split(',') if x.isnumeric()])
                         elif ' mph' in ss:
                             ns.append(int(ss.split(' mph')[0]) * 1.609344)
                     if len(ns) > 0:
@@ -1614,12 +1717,14 @@ def calc_avg_speed(graph, road_type_col_name, save_csv=False, save_path=None, ex
                     else:
                         continue
                 elif isinstance(s, str):
-                    if not any(c.isalpha() for c in s) and not (';' in s) and not ('|' in s):
+                    if not any(c.isalpha() for c in s) and not (';' in s) and not ('|' in s) and not (',' in s):
                         ss = int(s)
                     elif not any(c.isalpha() for c in s) and ';' in s:
                         ss = mean([int(x) for x in s.split(';') if x.isnumeric()])
                     elif not any(c.isalpha() for c in s) and '|' in s:
                         ss = mean([int(x) for x in s.split('|') if x.isnumeric()])
+                    elif not any(c.isalpha() for c in s) and ',' in s:
+                        ss = mean([int(float(x)) for x in s.split(',')])
                     elif ' mph' in s:
                         ss = int(s.split(' mph')[0]) * 1.609344
                     else:
@@ -1654,6 +1759,7 @@ def assign_avg_speed(graph, avg_road_speed, road_type_col_name, save_path=None, 
     # make a list of strings instead of just a string of the road types column
     avg_road_speed["road_types"] = avg_road_speed["road_types"].astype(str)
 
+
     # calculate the average maximum speed per edge and assign the ones that don't have a value
     for u, v, k, edata in graph.edges.data(keys=True):
         road_type = str(edata[road_type_col_name])
@@ -1662,12 +1768,14 @@ def assign_avg_speed(graph, avg_road_speed, road_type_col_name, save_path=None, 
             if isinstance(max_speed, list):
                 ns = []
                 for ms in max_speed:
-                    if not any(c.isalpha() for c in ms) and not (';' in ms) and not ('|' in ms):
+                    if not any(c.isalpha() for c in ms) and not (';' in ms) and not ('|' in ms) and not (',' in ms):
                         ns.append(int(ms))
                     elif not any(c.isalpha() for c in ms) and ';' in ms:
                         ns.extend([int(x) for x in ms.split(';') if x.isnumeric()])
                     elif not any(c.isalpha() for c in ms) and '|' in ms:
                         ns.extend([int(x) for x in ms.split('|') if x.isnumeric()])
+                    elif not any(c.isalpha() for c in ms) and ',' in ms:
+                        ns.extend([int(x) for x in ms.split(',') if x.isnumeric()])
                     elif ' mph' in ms:
                         ns.append(int(ms.split(' mph')[0]) * 1.609344)
                 if len(ns) > 0:
@@ -1676,12 +1784,14 @@ def assign_avg_speed(graph, avg_road_speed, road_type_col_name, save_path=None, 
                     graph[u][v][k]['avgspeed'] = \
                     avg_road_speed.loc[avg_road_speed['road_types'] == road_type, 'avg_speed'].iloc[0]
             elif isinstance(max_speed, str):
-                if not any(c.isalpha() for c in max_speed) and not (';' in max_speed) and not ('|' in max_speed):
+                if not any(c.isalpha() for c in max_speed) and not (';' in max_speed) and not ('|' in max_speed) and not (',' in max_speed):
                     graph[u][v][k]['avgspeed'] = int(max_speed)
                 elif not any(c.isalpha() for c in max_speed) and ';' in max_speed:
                     graph[u][v][k]['avgspeed'] = mean([int(x) for x in max_speed.split(';') if x.isnumeric()])
                 elif not any(c.isalpha() for c in max_speed) and '|' in max_speed:
                     graph[u][v][k]['avgspeed'] = mean([int(x) for x in max_speed.split('|') if x.isnumeric()])
+                elif not any(c.isalpha() for c in max_speed) and ',' in max_speed:
+                    graph[u][v][k]['avgspeed'] = mean([int(float(x)) for x in max_speed.split(',')])
                 elif ' mph' in max_speed:
                     graph[u][v][k]['avgspeed'] = int(max_speed.split(' mph')[0]) * 1.609344
                 else:
@@ -1708,7 +1818,7 @@ def assign_avg_speed(graph, avg_road_speed, road_type_col_name, save_path=None, 
 
 
 
-def hazard_intersect_graph(graph, hazard, hazard_name, name, agg='max', save_path=None, save_shp=False,
+def hazard_intersect_graph(graph, hazard, hazard_name, name, agg='max', save_path=r'C:\Users\loure_le\ra2ce\ra2ce\test\output', save_shp=True,
                            save_pickle=False):
     """adds hazard values (flood/earthquake/etc) to the roads in a graph
     Args:
@@ -2132,6 +2242,7 @@ def criticality_multi_link_hazard_OD(graph, prefRoutes, weighingName, hazardName
         geometry='geometry', crs={'init': 'epsg:{}'.format(crs_)})
 
     to_remove = [(e[0], e[1], e[2]) for e in graph.edges.data(keys=True) if (e[-1][hazardName] > threshold) & ('bridge' not in e[-1])]
+    # to_remove = [(e[0], e[1], e[2]) for e in graph.edges.data(keys=True) if (e[-1][hazardName] > threshold)]
     graph.remove_edges_from(to_remove)
 
     for ii in range(len(prefRoutes.index)):
@@ -2154,6 +2265,7 @@ def criticality_multi_link_hazard_OD(graph, prefRoutes, weighingName, hazardName
             print(extra_time)
             if prefRoutes.iloc[ii][weighingName] != alt_route:
                 # the alternative route is different from the optimal route
+                print('yes')
                 disrupted = 1
                 detour = "alt_route"
                 # found out which edges belong to the preferred path
@@ -2371,3 +2483,148 @@ def add_missing_geoms_graph(graph, geom_name='geometry'):
             [graph.nodes[ed[0]][geom_name], graph.nodes[ed[1]][geom_name]])
 
     return graph
+
+def find_closest_node_attr(H, keyName, weighingName, originLabelContains, destLabelContains):
+    """Find the closest destination node with a certain attribute from all origin nodes
+
+    Returns:
+        originClosestDest [list of tuples]: list of the origin and destination node id and node name from the routes that are found
+        list_no_path [list of tuples]: list of the origin and destination node id and node name from the origins/nodes that do not have a route between them
+    """
+    H.add_node('special', speciallabel='special')
+
+    special_edges = []
+    for n, ndat in H.nodes.data():
+        if keyName in ndat:
+            if destLabelContains in ndat[keyName]:
+                special_edges.append((n, 'special', {weighingName: 0}))
+
+    H.add_edges_from(special_edges)
+
+    list_no_path = []
+    for n, ndat in H.nodes.data():
+        if keyName in ndat:
+            if originLabelContains in ndat[keyName]:
+                if nx.has_path(H, n, 'special'):
+                    path = nx.shortest_path(H, source=n, target='special', weight=weighingName)
+                    ndat['closest'] = path[-2]  # Closest node with destLabelContains in keyName
+                else:
+                    list_no_path.append((n, ndat[keyName]))
+
+    originClosestDest = [((nn[0], nn[-1][keyName]), (nn[-1]['closest'], H.nodes[nn[-1]['closest']][keyName])) for nn in H.nodes.data() if 'closest' in nn[-1]]
+    return originClosestDest, list_no_path
+
+
+def calc_pref_routes_closest_dest(graph, base_graph, weighing, crs, od_id, idName, origin_closest_dest, origins):
+    # dataframe to save the preferred routes
+    pref_routes = gpd.GeoDataFrame(columns=['o_node', 'd_node', 'origin', 'destination',
+                                            'pref_path', weighing, 'match_ids', 'pop2020', 'patients', 'tot_miles', 'geometry'],
+                                   geometry='geometry', crs='epsg:{}'.format(crs))
+
+    # find the optimal route without (hazard) disruption
+    for o, d in origin_closest_dest:
+        # calculate the length of the preferred route
+        pref_route = nx.dijkstra_path_length(graph, o[0], d[0], weight=weighing)
+
+        # save preferred route nodes
+        pref_nodes = nx.dijkstra_path(graph, o[0], d[0], weight=weighing)
+
+        # found out which edges belong to the preferred path
+        edgesinpath = list(zip(pref_nodes[0:], pref_nodes[1:]))
+
+        # Find the number of people per neighborhood
+        # nr_people_per_route_total = origins.loc[origins[od_id] == int(o[1].split('_')[-1]), nr_people_name].iloc[0]
+        # nr_patients_per_route = nr_people_per_route_total * factor_hospital
+
+        pref_edges = []
+        match_list = []
+        length_list = []
+        for u, v in edgesinpath:
+            # get edge with the lowest weighing if there are multiple edges that connect u and v
+            edge_key = sorted(graph[u][v], key=lambda x: graph[u][v][x][weighing])[0]
+            if 'geometry' in graph[u][v][edge_key]:
+                pref_edges.append(graph[u][v][edge_key]['geometry'])
+            else:
+                pref_edges.append(LineString([graph.nodes[u]['geometry'], graph.nodes[v]['geometry']]))
+            if idName in graph[u][v][edge_key]:
+                match_list.append(graph[u][v][edge_key][idName])
+            if 'length' in graph[u][v][edge_key]:
+                length_list.append(graph[u][v][edge_key]['length'])
+
+            # Add the number of people that need hospital care, to the road segments. For now, each road segment in a route
+            # gets attributed all the people that are taking that route.
+            # base_graph[u][v][edge_key]['P_pref'] = base_graph[u][v][edge_key]['P_pref'] + nr_patients_per_route
+
+        # compile the road segments into one geometry
+        pref_edges = MultiLineString(pref_edges)
+        pref_routes = pref_routes.append({'o_node': o[0], 'd_node': d[0], 'origin': o[1],
+                                          'destination': d[1], 'pref_path': pref_nodes,
+                                          weighing: pref_route, 'match_ids': match_list,
+                                          'tot_miles': sum(length_list) / 1609, 'geometry': pref_edges}, ignore_index=True)
+        # 'pop2020': nr_people_per_route_total, 'patients': nr_patients_per_route,
+
+    return pref_routes, base_graph
+
+
+def calc_routes_closest_dest(graph, base_graph, list_closest, pref_routes, weighing, origin, dest, od_id, wd, threshold_hospitals):
+    # , factor_hospital, nr_people_name
+    pp_no_delay = [0]
+    pp_delayed = [0]
+    extra_weights = [0]
+    extra_miles_total = [0]
+    list_hospital_flooded = []
+
+    # find the optimal route with hazard disruption
+    for o, d in list_closest:
+        # Check if the hospital that is accessed, is flooded
+        if dest.loc[dest[od_id] == int(d[1].split('_')[-1]), wd[:-2] + 'WD'].iloc[0] > threshold_hospitals:
+            list_hospital_flooded.append((o,d))
+            continue
+
+        # calculate the length of the preferred route
+        alt_route = nx.dijkstra_path_length(graph, o[0], d[0], weight=weighing)
+
+        # save preferred route nodes
+        alt_nodes = nx.dijkstra_path(graph, o[0], d[0], weight=weighing)
+
+        # Find the number of people per neighborhood
+        # nr_people_per_route_total = origin.loc[origin[od_id] == int(o[1].split('_')[-1]), nr_people_name].iloc[0]
+        # nr_patients_per_route = nr_people_per_route_total * factor_hospital
+
+        # find out which edges belong to the preferred path
+        edgesinpath = list(zip(alt_nodes[0:], alt_nodes[1:]))
+
+        # calculate the total length of the alternative route (in miles)
+        # Find the road segments that are used for the detour to the same or another hospital
+        length_list = []
+        for u, v in edgesinpath:
+            # get edge with the lowest weighing if there are multiple edges that connect u and v
+            edge_key = sorted(graph[u][v], key=lambda x: graph[u][v][x][weighing])[0]
+
+            # Add the number of people that need hospital care, to the road segments. For now, each road segment in a route
+            # gets attributed all the people that are taking that route.
+            # base_graph[u][v][edge_key][wd[:-2] + '_P'] = base_graph[u][v][edge_key][wd[:-2] + '_P'] + nr_patients_per_route
+
+            if 'length' in graph[u][v][edge_key]:
+                length_list.append(graph[u][v][edge_key]['length'])
+
+        alt_miles = sum(length_list) / 1609
+
+        # If the destination is different from the origin, the destination is further than without hazard disruption
+        if pref_routes.loc[(pref_routes['origin'] == o[1]) & (pref_routes['destination'] == d[1])].empty:
+            # subtract the length/time of the optimal route from the alternative route
+            extra_dist = alt_route - pref_routes.loc[pref_routes['origin'] == o[1], weighing].iloc[0]
+            extra_miles = alt_miles - pref_routes.loc[pref_routes['origin'] == o[1], 'tot_miles'].iloc[0]
+            pp_delayed.append(nr_patients_per_route)
+            extra_weights.append(extra_dist)
+            extra_miles_total.append(extra_miles)
+        else:
+            pp_no_delay.append(nr_patients_per_route)
+
+        # compile the road segments into one geometry
+        # alt_edges = MultiLineString(alt_edges)
+
+        # Add the number of patients to the total number of patients that go to that hospital
+        dest.loc[dest[od_id] == int(d[1].split('_')[-1]), wd[:-2] + '_P'] = dest.loc[dest[od_id] == int(d[1].split('_')[-1]), wd[:-2] + '_P'].iloc[0] + nr_patients_per_route
+
+    return base_graph, dest, list_hospital_flooded, pp_no_delay, pp_delayed, extra_weights, extra_miles_total
