@@ -1,0 +1,11 @@
+ Volume in drive C is Windows
+ Volume Serial Number is 5ACB-8927
+
+ Directory of C:\Users\lotte\OneDrive\Documenten\GitHub\resilient_accessibility
+
+09-11-2021  10:57    <DIR>          .
+09-11-2021  10:57    <DIR>          ..
+09-11-2021  10:56                66 .gitattributes
+09-11-2021  10:57                 0 deleteme.txt
+               2 File(s)             66 bytes
+               2 Dir(s)     732.229.632 bytes free
